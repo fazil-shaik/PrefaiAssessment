@@ -1,6 +1,6 @@
 const axios = require('axios');
-const SwaggerParser = require('swagger-parser');
-const { generateDummyData } = require('../utils/dataGenerator');
+const SwaggerParser = require('@apidevtools/swagger-parser');
+const { generateDummyData, extractParameters, generateRequestBody } = require('../utils/openApiParser');
 const Evaluation = require('../models/Evaluation');
 
 const evaluateApi = async (req, res, next) => {
@@ -41,11 +41,17 @@ const evaluateApi = async (req, res, next) => {
         apiSpec = await SwaggerParser.parse(spec);
       }
 
-      if (!apiSpec.servers && apiSpec.host && apiSpec.basePath && apiSpec.schemes) {
-        // Use the first scheme (usually https)
-        apiSpec.servers = [
-          { url: `${apiSpec.schemes[0]}://${apiSpec.host}${apiSpec.basePath}` }
-        ];
+      // Handle both OpenAPI 2.0 and 3.0.x specifications
+      if (!apiSpec.servers) {
+        if (apiSpec.host && apiSpec.basePath && apiSpec.schemes) {
+          // OpenAPI 2.0 format
+          apiSpec.servers = [
+            { url: `${apiSpec.schemes[0]}://${apiSpec.host}${apiSpec.basePath}` }
+          ];
+        } else if (apiSpec.openapi && apiSpec.openapi.startsWith('3.0')) {
+          // OpenAPI 3.0.x format
+          apiSpec.servers = apiSpec.servers || [{ url: '/' }];
+        }
       }
     } catch (parseError) {
       console.error('Error parsing API spec:', parseError);
@@ -96,33 +102,84 @@ const evaluateApi = async (req, res, next) => {
       for (const [method, details] of Object.entries(methods)) {
         if (method.toLowerCase() === 'get' || method.toLowerCase() === 'post') {
           try {
-            const fullUrl = `${apiSpec.servers[0].url}${path}`;
-            console.log(`Testing ${method.toUpperCase()} ${fullUrl}`);
-            
-            const requestData = method.toLowerCase() === 'post' 
-              ? generateDummyData(details.requestBody?.content?.['application/json']?.schema)
-              : null;
+            const endpoint = {
+              method: method.toUpperCase(),
+              path,
+              parameters: details.parameters || [],
+              requestBody: details.requestBody
+            };
 
-            const response = await axios({
-              method: method.toLowerCase(),
-              url: fullUrl,
-              data: requestData,
-              timeout: 30000,
-              validateStatus: () => true, // Accept all status codes
-              headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json'
-              }
+            // Extract parameters and generate request data
+            const { pathParams, queryParams, headers: paramHeaders } = extractParameters(endpoint, apiSpec);
+            const requestBody = generateRequestBody(endpoint, apiSpec);
+
+            // Build URL with path parameters
+            let fullUrl = `${apiSpec.servers[0].url}${path}`;
+            Object.entries(pathParams).forEach(([key, value]) => {
+              fullUrl = fullUrl.replace(`{${key}}`, String(value));
             });
+
+            // Add query parameters
+            if (Object.keys(queryParams).length > 0) {
+              const searchParams = new URLSearchParams();
+              Object.entries(queryParams).forEach(([key, value]) => {
+                if (value !== null && value !== undefined) {
+                  searchParams.append(key, String(value));
+                }
+              });
+              fullUrl += `?${searchParams.toString()}`;
+            }
+
+            console.log(`Testing ${method.toUpperCase()} ${fullUrl}`);
+
+            // Prepare headers
+            const headers = {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json',
+              ...paramHeaders
+            };
+
+            // Execute request with retries
+            let retries = 0;
+            const maxRetries = 3;
+            let response;
+
+            while (retries <= maxRetries) {
+              try {
+                response = await axios({
+                  method: method.toLowerCase(),
+                  url: fullUrl,
+                  data: requestBody,
+                  headers,
+                  timeout: 30000,
+                  validateStatus: () => true
+                });
+                break;
+              } catch (error) {
+                retries++;
+                if (retries > maxRetries) {
+                  throw error;
+                }
+                // Wait before retry with exponential backoff
+                await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, retries - 1)));
+              }
+            }
 
             results.push({
               path,
               method: method.toUpperCase(),
-              requestData,
+              request: {
+                url: fullUrl,
+                method: method.toUpperCase(),
+                headers,
+                body: requestBody
+              },
               response: {
                 status: response.status,
+                statusText: response.statusText,
+                headers: response.headers,
                 data: response.data,
-                headers: response.headers
+                duration: response.duration
               },
               success: response.status >= 200 && response.status < 300
             });
@@ -133,7 +190,10 @@ const evaluateApi = async (req, res, next) => {
             results.push({
               path,
               method: method.toUpperCase(),
-              error: error.message,
+              error: {
+                message: error.message,
+                code: error.code || 'UNKNOWN_ERROR'
+              },
               success: false
             });
           }

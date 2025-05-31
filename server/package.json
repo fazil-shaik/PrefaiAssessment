@@ -17,7 +17,7 @@
     "express-validator": "^7.0.1",
     "mongodb": "^6.16.0",
     "mongoose": "^8.0.1",
-    "swagger-parser": "^10.0.3",
+    "@apidevtools/swagger-parser": "^10.1.0",
     "winston": "^3.11.0"
   },
   "devDependencies": {
