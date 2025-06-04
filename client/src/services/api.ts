@@ -31,16 +31,16 @@ export const evaluateApi = async (url: string | null, spec: any | null): Promise
   const body: any = {};
   if (url) body.url = url;
   if (spec) body.spec = spec;
-  const response = await axios.post(`${API_URL}/evaluate`, body);
+  const response = await axios.post(`${API_URL}/api/evaluate`, body);
   return response.data.data;
 };
 
 export const getEvaluationHistory = async () => {
-  const response = await axios.get(`${API_URL}/history`);
+  const response = await axios.get(`${API_URL}/api/history`);
   return response.data.data;
 };
 
 export const getEvaluationResult = async (id: string) => {
-  const response = await axios.get(`${API_URL}/evaluation/${id}`);
+  const response = await axios.get(`${API_URL}/api/evaluation/${id}`);
   return response.data.data;
 }; 
