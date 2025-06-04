@@ -12,7 +12,8 @@ const PORT = process.env.PORT || 7000;
 const corsOptions = {
   origin: [
     process.env.CLIENT_URL || 'http://localhost:3000',
-    'https://prefai-assessment.vercel.app'
+    'https://prefai-assessment.vercel.app',
+    'https://prefaiassessment.onrender.com',
   ],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
