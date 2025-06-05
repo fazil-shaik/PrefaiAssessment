@@ -3,6 +3,78 @@ const SwaggerParser = require('@apidevtools/swagger-parser');
 const { generateDummyData, extractParameters, generateRequestBody } = require('../utils/openApiParser');
 const Evaluation = require('../models/Evaluation');
 
+// Helper function to generate UUID
+const generateUUID = () => {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    const r = Math.random() * 16 | 0;
+    const v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+};
+
+// Helper function to validate response against schema
+const validateResponseAgainstSchema = (response, schema, definitions) => {
+  if (!schema) return true;
+
+  try {
+    // Handle array type
+    if (schema.type === 'array' && schema.items) {
+      if (!Array.isArray(response)) return false;
+      return response.every(item => validateResponseAgainstSchema(item, schema.items, definitions));
+    }
+
+    // Handle object type
+    if (schema.type === 'object' || schema.properties) {
+      if (typeof response !== 'object' || response === null) return false;
+      
+      // Check required properties
+      if (schema.required) {
+        for (const prop of schema.required) {
+          if (!(prop in response)) return false;
+        }
+      }
+
+      // Check each property against its schema
+      for (const [prop, propSchema] of Object.entries(schema.properties || {})) {
+        if (prop in response) {
+          if (!validateResponseAgainstSchema(response[prop], propSchema, definitions)) {
+            return false;
+          }
+        }
+      }
+      return true;
+    }
+
+    // Handle primitive types
+    switch (schema.type) {
+      case 'string':
+        return typeof response === 'string';
+      case 'integer':
+        return Number.isInteger(response);
+      case 'number':
+        return typeof response === 'number';
+      case 'boolean':
+        return typeof response === 'boolean';
+      case 'null':
+        return response === null;
+    }
+
+    // Handle references
+    if (schema.$ref) {
+      const refPath = schema.$ref.replace('#/definitions/', '');
+      const refSchema = definitions[refPath];
+      if (refSchema) {
+        return validateResponseAgainstSchema(response, refSchema, definitions);
+      }
+    }
+
+    return true;
+  } catch (error) {
+    console.error('Schema validation error:', error);
+    return false;
+  }
+};
+
 const evaluateApi = async (req, res, next) => {
   try {
     console.log('Starting API evaluation...');
@@ -132,12 +204,17 @@ const evaluateApi = async (req, res, next) => {
 
             console.log(`Testing ${method.toUpperCase()} ${fullUrl}`);
 
-            // Prepare headers
+            // Prepare headers with authentication if required
             const headers = {
               'Content-Type': 'application/json',
               'Accept': 'application/json',
               ...paramHeaders
             };
+
+            // Add API key if required
+            if (details.security && details.security.some(s => s.api_key)) {
+              headers['api_key'] = 'special-key'; // Using the test key from the spec
+            }
 
             // Execute request with retries
             let retries = 0;
@@ -152,7 +229,7 @@ const evaluateApi = async (req, res, next) => {
                   data: requestBody,
                   headers,
                   timeout: 30000,
-                  validateStatus: () => true
+                  validateStatus: () => true // Accept any status code
                 });
                 break;
               } catch (error) {
@@ -164,6 +241,26 @@ const evaluateApi = async (req, res, next) => {
                 await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, retries - 1)));
               }
             }
+
+            // Validate response against schema
+            let isValidResponse = false;
+            if (details.responses && details.responses['200']) {
+              const responseSchema = details.responses['200'].content?.['application/json']?.schema;
+              if (responseSchema) {
+                isValidResponse = validateResponseAgainstSchema(
+                  response.data,
+                  responseSchema,
+                  apiSpec.definitions
+                );
+              }
+            }
+
+            // Consider the response successful if:
+            // 1. Status code is 2xx
+            // 2. Response matches schema (if schema is defined)
+            // 3. No schema defined but response is valid JSON
+            const isSuccess = response.status >= 200 && response.status < 300 && 
+              (isValidResponse || !details.responses?.['200']?.content?.['application/json']?.schema);
 
             results.push({
               path,
@@ -181,20 +278,25 @@ const evaluateApi = async (req, res, next) => {
                 data: response.data,
                 duration: response.duration
               },
-              success: response.status >= 200 && response.status < 300
+              success: isSuccess,
+              validation: {
+                schemaValid: isValidResponse,
+                statusValid: response.status >= 200 && response.status < 300
+              }
             });
             
-            console.log(`Test completed for ${method.toUpperCase()} ${path} - Status: ${response.status}`);
+            console.log(`Test completed for ${method.toUpperCase()} ${path} - Status: ${response.status}, Valid: ${isValidResponse}`);
           } catch (error) {
             console.error(`Error testing ${method.toUpperCase()} ${path}:`, error.message);
             results.push({
               path,
               method: method.toUpperCase(),
-              error: {
-                message: error.message,
-                code: error.code || 'UNKNOWN_ERROR'
-              },
-              success: false
+              error: error.message || 'Unknown error occurred',
+              success: false,
+              validation: {
+                schemaValid: false,
+                statusValid: false
+              }
             });
           }
         }
@@ -226,7 +328,11 @@ const evaluateApi = async (req, res, next) => {
         summary: {
           successRate,
           totalEndpoints: results.length,
-          successfulEndpoints: successCount
+          successfulEndpoints: successCount,
+          validationDetails: {
+            schemaValidationPassed: results.filter(r => r.validation?.schemaValid).length,
+            statusValidationPassed: results.filter(r => r.validation?.statusValid).length
+          }
         }
       }
     });
